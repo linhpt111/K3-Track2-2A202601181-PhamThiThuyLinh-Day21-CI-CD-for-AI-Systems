@@ -67,15 +67,15 @@ Lý do lựa chọn: mô hình `ExtraTreesClassifier` sau khi gộp thêm dữ l
 Pipeline GitHub Actions gồm 4 job:
 
 - **Unit Test:** chạy `pytest tests/ -v`
-- **Train:** pull dữ liệu bằng DVC, train model, ghi `metrics.json`, upload model lên Azure Blob
-- **Eval:** kiểm tra accuracy phải đạt ít nhất `0.70`
-- **Deploy:** SSH vào EC2, restart service `mlops-serve`, kiểm tra `/health`
+- **Train:** pull dữ liệu bằng DVC, train model, ghi `metrics.json`, sau đó lưu model package thành GitHub artifact
+- **Eval:** kiểm tra accuracy phải đạt ít nhất `0.70` và so sánh với accuracy của model đang deploy trên Azure Blob
+- **Deploy:** chỉ upload model đã qua safety gate lên Azure Blob, SSH vào EC2, restart service `mlops-serve`, kiểm tra `/health`
 
 Run GitHub Actions đã hoàn thành thành công:
 
-- **Run URL:** https://github.com/linhpt111/K3-Track2-2A202601181-PhamThiThuyLinh-Day21-CI-CD-for-AI-Systems/actions/runs/32502234033
+- **Run URL:** https://github.com/linhpt111/K3-Track2-2A202601181-PhamThiThuyLinh-Day21-CI-CD-for-AI-Systems/actions/runs/32503374260
 - **Kết quả:** 4 job đều xanh: `Unit Test`, `Train`, `Eval`, `Deploy`
-- **Artifact:** `metrics`, gồm `outputs/metrics.json` và `outputs/report.txt`
+- **Artifact:** `model-package`, gồm `models/model.pkl`, `outputs/metrics.json` và `outputs/report.txt`
 
 Thông tin triển khai:
 
@@ -102,7 +102,7 @@ POST /predict -> {"prediction":0,"label":"thap"}
 
 ## 4. Hoàn Thành Các Thách Thức Nâng Cao (Bonus)
 
-Tôi đã hoàn thành **3 trên 5** thách thức nâng cao trong rubric.
+Tôi đã hoàn thành **4 trên 5** thách thức nâng cao trong rubric.
 
 ### Bonus 2: Thí nghiệm với nhiều thuật toán (+4 điểm)
 
@@ -114,6 +114,13 @@ Tôi đã hoàn thành **3 trên 5** thách thức nâng cao trong rubric.
 
 - **Tính toán:** Sau mỗi lần train, script tự động sinh confusion matrix và classification report gồm precision, recall, F1-score cho từng lớp.
 - **Lưu trữ:** Báo cáo được ghi vào `outputs/report.txt` và upload cùng `outputs/metrics.json` dưới dạng artifact của GitHub Actions.
+
+### Bonus 4: Hoàn trả về phiên bản trước / Rollback Safety Gate (+4 điểm)
+
+- **Logic an toàn:** Workflow không upload model mới ngay trong job `Train`. Thay vào đó, model mới được lưu thành artifact `model-package`.
+- **So sánh:** Job `Eval` tải `models/latest/metrics.json` của model đang deploy trên Azure Blob và so sánh với accuracy mới.
+- **Chặn deploy:** Nếu accuracy mới thấp hơn accuracy của model đang chạy, pipeline dừng lại và không upload model mới.
+- **Triển khai an toàn:** Chỉ sau khi qua Eval Gate và Rollback Safety Gate, job `Deploy` mới upload `model.pkl`, `metrics.json`, `report.txt` lên `models/latest/` và restart FastAPI trên EC2.
 
 ### Bonus 5: Cảnh báo lệch phân phối dữ liệu (+4 điểm)
 
@@ -131,6 +138,7 @@ Bài lab đã hoàn thành đầy đủ luồng MLOps từ thực nghiệm local
 - DVC quản lý dữ liệu với remote trên Azure Blob Storage.
 - GitHub Actions tự động test, train, eval và deploy.
 - Eval Gate đảm bảo chỉ deploy khi accuracy đạt ngưỡng `0.70`.
+- Rollback Safety Gate ngăn deploy nếu model mới có accuracy thấp hơn model đang chạy.
 - FastAPI chạy trên AWS EC2 và phục vụ model mới nhất từ Azure Blob.
 
 Kết quả cuối cùng đạt accuracy **0.7640**, vượt ngưỡng yêu cầu của lab và API inference hoạt động ổn định sau deploy.
