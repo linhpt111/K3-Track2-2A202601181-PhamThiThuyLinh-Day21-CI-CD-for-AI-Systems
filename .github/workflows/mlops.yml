@@ -36,7 +36,9 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # JOB 2 - TRAIN
-  # Xac thuc Azure Blob Storage, pull du lieu bang DVC, huan luyen mo hinh, upload artifact.
+  # Xac thuc Azure Blob Storage, pull du lieu bang DVC, huan luyen mo hinh,
+  # va luu model package thanh GitHub artifact. Model chi duoc upload len cloud
+  # sau khi Eval safety gate thong qua.
   # Chi chay khi Job 1 (Unit Test) hoan thanh thanh cong.
   # ---------------------------------------------------------------------------
   train:
@@ -77,39 +79,20 @@ jobs:
           ACC=$(python -c "import json; print(json.load(open('outputs/metrics.json'))['accuracy'])")
           echo "accuracy=$ACC" >> "$GITHUB_OUTPUT"
 
-      - name: Upload model to Cloud Storage
-        run: |
-          python - <<'EOF'
-          import os
-          from azure.storage.blob import BlobClient
-
-          container_name = os.environ["CLOUD_BUCKET"]
-          blob = BlobClient.from_connection_string(
-              conn_str=os.environ["AZURE_STORAGE_CONNECTION_STRING"],
-              container_name=container_name,
-              blob_name="models/latest/model.pkl",
-          )
-          with open("models/model.pkl", "rb") as f:
-              blob.upload_blob(f, overwrite=True)
-          print(f"Uploaded model to azure://{container_name}/models/latest/model.pkl")
-          EOF
-        env:
-          CLOUD_BUCKET: ${{ secrets.CLOUD_BUCKET }}
-          AZURE_STORAGE_CONNECTION_STRING: ${{ secrets.CLOUD_CREDENTIALS }}
-
-      - name: Save metrics as artifact
+      - name: Save model package as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: metrics
+          name: model-package
           path: |
+            models/model.pkl
             outputs/metrics.json
             outputs/report.txt
 
 
   # ---------------------------------------------------------------------------
   # JOB 3 - EVAL
-  # Kiem tra nguong chat luong (accuracy >= 0.70).
-  # Pipeline dung lai o day neu mo hinh chua dat yeu cau.
+  # Kiem tra nguong chat luong (accuracy >= 0.70) va rollback safety gate.
+  # Pipeline dung lai neu model moi kem hon model dang chay tren cloud.
   # Chi chay khi Job 2 (Train) hoan thanh thanh cong.
   # ---------------------------------------------------------------------------
   eval:
@@ -117,21 +100,70 @@ jobs:
     needs: train
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
 
-      - name: Check eval gate
+      - name: Install Azure SDK
+        run: pip install azure-storage-blob==12.22.0
+
+      - name: Download model package
+        uses: actions/download-artifact@v4
+        with:
+          name: model-package
+
+      - name: Check eval and rollback gates
         run: |
           python - <<'EOF'
-          acc = float("${{ needs.train.outputs.accuracy }}")
+          import json
+          import os
+          from azure.core.exceptions import ResourceNotFoundError
+          from azure.storage.blob import BlobClient
+
+          with open("outputs/metrics.json", encoding="utf-8") as f:
+              new_metrics = json.load(f)
+
+          acc = float(new_metrics["accuracy"])
           threshold = 0.70
           if acc < threshold:
               raise SystemExit(f"FAILED: accuracy {acc:.4f} < {threshold:.2f}. Cancel deploy.")
+
+          container_name = os.environ["CLOUD_BUCKET"]
+          previous_blob = BlobClient.from_connection_string(
+              conn_str=os.environ["AZURE_STORAGE_CONNECTION_STRING"],
+              container_name=container_name,
+              blob_name="models/latest/metrics.json",
+          )
+
+          try:
+              previous_metrics = json.loads(previous_blob.download_blob().readall())
+          except ResourceNotFoundError:
+              previous_metrics = None
+
+          if previous_metrics:
+              previous_acc = float(previous_metrics["accuracy"])
+              if acc < previous_acc:
+                  raise SystemExit(
+                      f"FAILED: new accuracy {acc:.4f} < current deployed accuracy "
+                      f"{previous_acc:.4f}. Cancel deploy."
+                  )
+              print(
+                  f"PASSED: new accuracy {acc:.4f} >= current deployed accuracy "
+                  f"{previous_acc:.4f}."
+              )
+          else:
+              print("PASSED: no previous deployed metrics found. First deploy can continue.")
+
           print(f"PASSED: accuracy {acc:.4f} >= {threshold:.2f}. Deploy can continue.")
           EOF
+        env:
+          CLOUD_BUCKET: ${{ secrets.CLOUD_BUCKET }}
+          AZURE_STORAGE_CONNECTION_STRING: ${{ secrets.CLOUD_CREDENTIALS }}
 
 
   # ---------------------------------------------------------------------------
   # JOB 4 - DEPLOY
-  # Trien khai len VM qua SSH.
+  # Upload model da qua safety gate len Azure Blob va trien khai len VM qua SSH.
   # Chi chay khi Job 3 (Eval) hoan thanh thanh cong.
   # ---------------------------------------------------------------------------
   deploy:
@@ -139,6 +171,44 @@ jobs:
     needs: eval
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install Azure SDK
+        run: pip install azure-storage-blob==12.22.0
+
+      - name: Download model package
+        uses: actions/download-artifact@v4
+        with:
+          name: model-package
+
+      - name: Upload approved model to Cloud Storage
+        run: |
+          python - <<'EOF'
+          import os
+          from azure.storage.blob import BlobClient
+
+          container_name = os.environ["CLOUD_BUCKET"]
+          uploads = {
+              "models/latest/model.pkl": "models/model.pkl",
+              "models/latest/metrics.json": "outputs/metrics.json",
+              "models/latest/report.txt": "outputs/report.txt",
+          }
+
+          for blob_name, local_path in uploads.items():
+              blob = BlobClient.from_connection_string(
+                  conn_str=os.environ["AZURE_STORAGE_CONNECTION_STRING"],
+                  container_name=container_name,
+                  blob_name=blob_name,
+              )
+              with open(local_path, "rb") as f:
+                  blob.upload_blob(f, overwrite=True)
+              print(f"Uploaded {local_path} to azure://{container_name}/{blob_name}")
+          EOF
+        env:
+          CLOUD_BUCKET: ${{ secrets.CLOUD_BUCKET }}
+          AZURE_STORAGE_CONNECTION_STRING: ${{ secrets.CLOUD_CREDENTIALS }}
 
       - name: SSH deploy to VM
         uses: appleboy/ssh-action@v1.0.3
