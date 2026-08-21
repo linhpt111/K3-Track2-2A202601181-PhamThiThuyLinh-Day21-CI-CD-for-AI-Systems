@@ -1,37 +1,47 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from google.cloud import storage
+from azure.storage.blob import BlobClient
 import joblib
 import os
+from urllib.request import urlretrieve
 
 app = FastAPI()
 
-GCS_BUCKET = os.environ["GCS_BUCKET"]
-GCS_MODEL_KEY = "models/latest/model.pkl"
+AZURE_STORAGE_CONNECTION_STRING = os.environ.get("AZURE_STORAGE_CONNECTION_STRING")
+AZURE_STORAGE_CONTAINER = os.environ.get("AZURE_STORAGE_CONTAINER")
+AZURE_MODEL_URL = os.environ.get("AZURE_MODEL_URL")
+AZURE_MODEL_BLOB = "models/latest/model.pkl"
 MODEL_PATH = os.path.expanduser("~/models/model.pkl")
 
 
 def download_model():
     """
-    Tai file model.pkl tu GCS ve may khi server khoi dong.
+    Tai file model.pkl tu Azure Blob Storage ve may khi server khoi dong.
 
     Ham nay duoc goi mot lan khi module duoc import. Su dung
-    GOOGLE_APPLICATION_CREDENTIALS de xac thuc (duoc dat trong systemd service).
+    AZURE_STORAGE_CONNECTION_STRING de xac thuc (duoc dat trong systemd service).
     """
-    # TODO 1: Tao storage.Client()
-    # client = storage.Client()
+    os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
 
-    # TODO 2: Lay bucket va blob tuong ung
-    # bucket = client.bucket(GCS_BUCKET)
-    # blob   = bucket.blob(GCS_MODEL_KEY)
+    if AZURE_MODEL_URL:
+        urlretrieve(AZURE_MODEL_URL, MODEL_PATH)
+        print("Downloaded model from AZURE_MODEL_URL")
+        return
 
-    # TODO 3: Tai file model xuong may
-    # blob.download_to_filename(MODEL_PATH)
+    if not AZURE_STORAGE_CONNECTION_STRING:
+        raise RuntimeError("Missing required environment variable AZURE_STORAGE_CONNECTION_STRING")
+    if not AZURE_STORAGE_CONTAINER:
+        raise RuntimeError("Missing required environment variable AZURE_STORAGE_CONTAINER")
 
-    # TODO 4: In thong bao thanh cong
-    # print("Model da duoc tai xuong tu GCS.")
+    blob = BlobClient.from_connection_string(
+        conn_str=AZURE_STORAGE_CONNECTION_STRING,
+        container_name=AZURE_STORAGE_CONTAINER,
+        blob_name=AZURE_MODEL_BLOB,
+    )
+    with open(MODEL_PATH, "wb") as f:
+        f.write(blob.download_blob().readall())
 
-    pass  # xoa dong nay sau khi hoan thanh tat ca TODO ben tren
+    print(f"Downloaded model from azure://{AZURE_STORAGE_CONTAINER}/{AZURE_MODEL_BLOB}")
 
 
 download_model()
@@ -50,8 +60,7 @@ def health():
 
     Tra ve: {"status": "ok"}
     """
-    # TODO 5: Tra ve dict {"status": "ok"}
-    pass  # xoa dong nay sau khi hoan thanh
+    return {"status": "ok"}
 
 
 @app.post("/predict")
@@ -67,17 +76,15 @@ def predict(req: PredictRequest):
         chlorides, free_sulfur_dioxide, total_sulfur_dioxide, density,
         pH, sulphates, alcohol, wine_type
     """
-    # TODO 6: Kiem tra so luong dac trung.
-    # Neu len(req.features) != 12, raise HTTPException(status_code=400, ...)
+    if len(req.features) != 12:
+        raise HTTPException(
+            status_code=400,
+            detail="Expected 12 features (wine quality)",
+        )
 
-    # TODO 7: Goi model.predict([req.features]) de lay ket qua du doan.
-    # pred = model.predict(...)
-
-    # TODO 8: Tra ve dict chua "prediction" (int) va "label" (string).
-    # Nhan tuong ung: 0 -> "thap", 1 -> "trung_binh", 2 -> "cao"
-    # return {"prediction": ..., "label": ...}
-
-    pass  # xoa dong nay sau khi hoan thanh tat ca TODO ben tren
+    pred = int(model.predict([req.features])[0])
+    labels = {0: "thap", 1: "trung_binh", 2: "cao"}
+    return {"prediction": pred, "label": labels.get(pred, "unknown")}
 
 
 if __name__ == "__main__":
